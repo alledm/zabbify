@@ -14,17 +14,25 @@ and clean up your mailbox.
 Examples
 =======
 
+```
 MAILTO=admin@mycompany.com
 
 30 03 * * * critical_db_backup.sh
-
+```
 You can integrate this script with Zabbix by changing the above line to 
 
+```
 30 03 * * * zabbify.sh critical_db_backup.sh
+```
 
 THAT'S ALL!!!
 ====
 
 zabbify will
-* create a exit_status[critical_db_backup.sh] item on Zabbix and send the exit status of the script
-* create a 
+* create an item `exit_status[critical_db_backup.sh]` on Zabbix and send the exit status of the script
+* create an item `output[critical_db_backup.sh]` on Zabbix and send the output of the script
+* create a trigger `{servername:exit_status[critical_db_backup.sh].last(0)}#0` to go off when the script exits with a non `0` status
+
+More information in the wiki page
+
+Please test it and report problems and suggestion to me
