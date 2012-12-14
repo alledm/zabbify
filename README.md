@@ -47,9 +47,14 @@ TEST
 ====
 
 * Run `zabbify` with test scripts to see if it works. Good examples are:
-``` zabbify /bin/true
+
+``` 
+zabbify /bin/true
 zabbify /bin/false
-zabbify echo test```
+zabbify echo test
+zabbify --itemname true /bin/false
+zabbify "cat somefile | grep something"
+```
 
 * If you have problems, change the error level in `/etc/zabbix.conf` to `DEBUG` and rerun
 
