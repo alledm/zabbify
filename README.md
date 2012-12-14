@@ -56,7 +56,7 @@ zabbify --itemname true /bin/false
 zabbify "cat somefile | grep something"
 ```
 
-* If you have problems, change the error level in `/etc/zabbix.conf` to `DEBUG` and rerun
+* If you have problems, change the error level in `/etc/zabbify.conf` to `DEBUG` and rerun
 
 
 More information (soon) in the wiki page
