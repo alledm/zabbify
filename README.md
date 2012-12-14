@@ -17,23 +17,43 @@ Examples
 ```
 MAILTO=admin@mycompany.com
 
-30 03 * * * critical_db_backup.sh
+00 05 * * * /usr/bin/mysqldump --databases zabbix --single-transaction | /bin/gzip > /opt/backups/mysql/zabbix/zabbix.sql.gz 2> /dev/null
 ```
 You can integrate this script with Zabbix by changing the above line to 
 
 ```
-30 03 * * * zabbify.sh critical_db_backup.sh
+00 05 * * * zabbify "/usr/bin/mysqldump --databases zabbix --single-transaction | /bin/gzip > /opt/backups/mysql/zabbix/zabbix.sql.gz 2> /dev/null"
 ```
 
 THAT'S ALL!!!
 ====
 
 zabbify will
-* create an item `exit_status[critical_db_backup.sh]` on Zabbix and send the exit status of the script
-* create an item `output[critical_db_backup.sh]` on Zabbix and send the output of the script
-* create a trigger `{servername:exit_status[critical_db_backup.sh].last(0)}#0` to go off when the script exits with a non `0` status
+* create an item `exit_status[mysqldump]` on Zabbix and send the exit status of the script
+* create an item `output[mysqldump]` on Zabbix and send the output of the script
+* create a trigger `{servername:exit_status[mysqldump].last(0)}#0` to go off when the script exits with a non `0` status
 
-More information in the wiki page
+*IMPORTANT*: Zabbix Server needs a couple of minutes from when the items are created to when you can use them to send data to. Please run it a few times and then wait if you do not see them being populated.
 
-Please test it and report problems and suggestion to me
-j
+INSTALLATION
+====
+
+* Create a config file in `/etc/zabbify.conf` like the one provided as example
+* Install `zabbify` in a convenient location (`/usr/bin`) and give appropriate permissions (`chmod 555 /usr/bin/zabbify`)
+* The script depends on the `zabbix_api` and `zbxsend` libraries. Please install them in the `PYTHONPATH`
+* `zbxsend` will not work with Python3. The version I have included adds some minor fixes. Will send the patch to the author soon.
+
+TEST
+====
+
+* Run `zabbify` with test scripts to see if it works. Good examples are:
+``` zabbify /bin/true
+zabbify /bin/false
+zabbify echo test```
+
+* If you have problems, change the error level in `/etc/zabbix.conf` to `DEBUG` and rerun
+
+
+More information (soon) in the wiki page
+
+Please test it and report problems and suggestion to me 
