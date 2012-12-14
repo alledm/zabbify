@@ -29,9 +29,9 @@ THAT'S ALL!!!
 ====
 
 zabbify will
-* create an item `exit_status[mysqldump]` on Zabbix and send the exit status of the script
+* create an item `exit_value[mysqldump]` on Zabbix and send the exit status of the script
 * create an item `output[mysqldump]` on Zabbix and send the output of the script
-* create a trigger `{servername:exit_status[mysqldump].last(0)}#0` to go off when the script exits with a non `0` status
+* create a trigger `{servername:exit_value[mysqldump].last(0)}#0` to go off when the script exits with a non `0` status
 
 *IMPORTANT*: Zabbix Server needs a couple of minutes from when the items are created to when you can use them to send data to. Please run it a few times and then wait if you do not see them being populated.
 
