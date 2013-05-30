@@ -2,18 +2,15 @@
 
 
 import os
-import re
 import sys
-import subprocess
 import socket
 import logging
+import subprocess, threading
 
 
 logging.basicConfig(format='%(asctime)s %(levelname)6s : %(message)s',level=logging.ERROR)
 default_log_handler = logging.StreamHandler(sys.stdout)
-
-__logger = logging.getLogger("zabbify")
-_ =  __logger
+log =  logging.getLogger("zabbify")
 
 defaults = {"loglevel" : "ERROR", "port" : 10050, "username" : "api", "password" : "api", "URL" : "http://%(server)s/zabbix"}
 configfiles = ["/etc/zabbify.conf", "/usr/local/etc/zabbify.conf"]
@@ -28,31 +25,22 @@ config = configparser.ConfigParser(defaults)
 try:
     config.read(configfiles)
 except:
-    _.critical("No config file defined. Please create one. [config = %s]" % configfile)
+    log.critical("No config file defined. Please create one. [config = %s]" % configfiles)
     
 if not config.has_section('ZABBIX'):
-    _.critical("Incorrect config file. Please fix it.")
+    log.critical("Incorrect config file. Please fix it.")
     sys.exit(1)
     
-
-zabbix_server       = config.get("ZABBIX", "server")
-zabbix_server_port  = config.getint("ZABBIX", "port")
-zabbix_server_url   = config.get("ZABBIX", "URL", raw=False)
-
-username = config.get("ZABBIX", "username")
-password = config.get("ZABBIX", "password")
-
 loglevel = config.get("ZABBIX", "loglevel")
-
+        
 if loglevel == "DEBUG":
-    _.setLevel(logging.DEBUG)
+    log.setLevel(logging.DEBUG)
 elif loglevel == "INFO":
-    _.setLevel(logging.INFO)
+    log.setLevel(logging.INFO)
 elif loglevel == "ERROR":
-    _.setLevel(logging.ERROR)
+    log.setLevel(logging.ERROR)
 
-
-
+    
 try:
     from zabbix_api import ZabbixAPI, ZabbixAPIException
     from zbxsend import Metric, send_to_zabbix
@@ -62,30 +50,32 @@ except ImportError:
         from zabbix_api import ZabbixAPI, ZabbixAPIException
         from zbxsend import Metric, send_to_zabbix
     except ImportError:
-        _.critical(sys.exc_info()[1])
+        log.critical(sys.exc_info()[1])
 
 
-aliasname = None
-api_log_level = 0
-arguments = sys.argv[1:]
 
 def help_message():
     print ("""zabbify.py - quick integration of scripts with Zabbix
-    --itemname    : Overrides the name of the item to be used on Zabbix
-    --help        : Displays this help 
+    --itemname  <name>  	: Overrides the name of the item to be used on Zabbix
+    --timeout   <seconds>    	: It the script takes longer than <seconds> Zabbify will trigger a notification
+    --help        		: Displays this help 
     """)
 
-def parse():
-    global arguments, aliasname
+def parse(arguments):
+    global aliasname, timeout
     option_itemname = "--itemname"
     option_help = "--help"
     option_debug = "--debug"
+    option_timeout = "--timeout"
 
     
     if option_help in arguments:
         help_message()
         sys.exit()
        
+    if option_timeout in arguments:
+        timeout = int(arguments.pop(arguments.index(option_timeout)+1))
+        arguments.remove(option_timeout)
 
     if option_itemname in arguments:
         aliasname = arguments.pop(arguments.index(option_itemname)+1)
@@ -93,100 +83,240 @@ def parse():
         
     if option_debug in arguments:
         arguments.remove(option_debug)
-        _.setLevel(logging.DEBUG)
+        log.setLevel(logging.DEBUG)
     
+    return arguments
+    
+
+    
+
+
+class Command(object):
+    def __init__(self, cmd, timeoutCallback = None):
+        self.cmd = cmd
+        self.process = None
+        self.timeout = False
+        self.timeoutCallback = timeoutCallback
+        
+        if self.timeoutCallback == None:
+            self.timeoutCallback = self.default()
+        
+    def default(self):
+        log.info("Timeout occurred")
+        
+
+    def run(self, timeout=None):
+        def target():
+            try:
+                self.process = subprocess.Popen(self.cmd, shell = True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.command_output = self.process.communicate()[0]
+                self.return_value = self.process.returncode
+            except subprocess.CalledProcessError as e:
+                self.return_value = e.returncode
+                self.command_output = e.output.decode("utf-8")
+
+
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join(timeout)
+        if (thread.isAlive()):
+            self.timeout = True
+            self.timeoutCallback(1)
+            thread.join()
+        else:
+            #Clears the alert if still there
+            self.timeoutCallback(0)
+
+
+class ZabbixHost():
+    def __init__(self, zapi, hostname):
+        self.zapi = zapi
+        self.hostname = hostname
+        
+        try:
+            self.host = zapi.host.get({"output": "extend", "filter":{"host":self.hostname}}).pop()
+            self.id = self.host["hostid"]
+        except IndexError:
+            log.error("The host %s does not appear to be registered to this Zabbix Server" % self.hostname)
+            raise
+        
+            
+        
+        
+    def hasItem(self, itemname):
+        return self.zapi.item.exists({"hostid":self.id, "key_":itemname})
+        
+    def hasApplication(self, application):
+        return self.zapi.application.exists({"hostid": self.id, "name" : application})
+    
+    def hasTrigger(self, expression):
+        return self.zapi.trigger.exists({"host":self.hostname, "expression":expression})
+        
+    def createApplication(self, application):
+        return self.zapi.application.create({ "name": application, "hostid": self.id })[0]["applicationid"]
+    
+    def createItem(self, key , name, item_type, value_type, data_type, application_id):
+        return self.zapi.item.create({ "name" : name, "hostid": self.id ,  "key_": key, "type": item_type, "value_type": value_type, "data_type" : data_type, "applications" : [ application_id] })
+    
+    def createTrigger(self, expression, description, application_id ):
+        return self.zapi.trigger.create({ "description" : description, "expression": expression, "applications" : [ application_id] })
+    
+    def getApplicationId(self, application):
+        return self.zapi.application.get({"output": "extend", "filter":{"name":application, "hostid": self.id}})[0]["applicationid"]
+        
+
+class Zabbify():
+    def __init__(self, config):
+        self.hostregistered = False
+        self.loggedin = False
+        self.api_log_level = 0
+        
+        self.zabbix_server       = config.get("ZABBIX", "server")
+        self.zabbix_server_port  = config.getint("ZABBIX", "port")
+        self.zabbix_server_url   = config.get("ZABBIX", "URL", raw=False)
+        
+        self.username = config.get("ZABBIX", "username")
+        self.password = config.get("ZABBIX", "password")
+        self.loglevel = config.get("ZABBIX", "loglevel")
+        self.hostname = config.get("ZABBIX", "hostname")
+        
+        if not self.hostname or self.hostname == "":
+            self.hostname = socket.gethostname()
+        
+        self.zapi = ZabbixAPI(server=self.zabbix_server_url, path="", log_level=self.api_log_level)
+        
+        try:
+            self.zapi.login(self.username, self.password)
+            self.loggedin = True
+        except ZabbixAPIException as e:
+            log.error("Error while logging in: %s" % e)
+        except:
+            log.error("Error while logging in: %s" % sys.exc_info()[0])
+            
+        try:
+            self.zhost = ZabbixHost(self.zapi, self.hostname)
+            self.hostregistered = True
+        except:
+            self.hostregistered = False
+            pass
+        
+        log.debug("Zabbix server %s - Port: %d  - URL %s" % (self.zabbix_server, self.zabbix_server_port, self.zabbix_server_url))
+        
+    def setTimeout(self, timeout):
+        self.timeout = timeout
+        
+    def setup(self, scriptname):
+        self.item_exit_value = "exit_value[%s]" % scriptname
+        self.item_output = "output[%s]" % scriptname
+        self.item_timeout = "timeout[%s]" % scriptname
+        self.trigger_expression = "{%s:%s.last(0)}#0" % (self.hostname, self.item_exit_value)
+        self.timeout_expression = "{%s:%s.last(0)}#0" % (self.hostname, self.item_timeout)
+        self.application = "Scripts"
+        
+        if not self.zapi.logged_in():
+            log.error("Could not login. Please check your config file. Will execute the script anyway.")
+            return
+        
+        if not self.zhost:
+            log.error("This host is not configured on Zabbix")
+            return
+              
+        
+        
+        if self.zhost.hasApplication(self.application) != True:
+            log.debug("Application %s for host %s does not exist: creating it" % (self.application, self.zhost.hostname))
+            self.appid = self.zhost.createApplication(self.application)
+            log.debug(self.appid)
+        else:
+            self.appid = self.zhost.getApplicationId(self.application)
+            log.debug("Application %s for host %s exists: %s" % (self.application, self.hostname, self.appid))
+            
+        if self.zhost.hasItem(self.item_exit_value) != True:
+            log.debug("Item %s for host %s does not exist: creating it" % (self.item_exit_value, self.zhost.hostname))
+            itemid = self.zhost.createItem(self.item_exit_value, "Exit status for script $1", 2, 3, 0, self.appid)       
+            log.debug("Created item %s for host %s on zabbix server %s" % (itemid["itemids"], self.hostname, self.zabbix_server))
+
+
+        if self.zhost.hasItem(self.item_timeout) != True:
+            log.debug("Item %s for host %s does not exist: creating it" % (item_timeout, self.hostname))
+            itemid = self.zhost.createItem(self.item_timeout, "Timeout for $1", 2, 3, 3, self.appid) 
+            log.debug("Created item %s for host %s on zabbix server %s" % (itemid["itemids"], self.hostname, self.zabbix_server))
+
+        if self.zhost.hasItem(self.item_output) != True:
+            log.debug("Item %s for host %s does not exist: creating it" % (self.item_output, self.hostname))
+            itemid = self.zhost.createItem(self.item_output, "Output for $1", 2, 4, 3, self.appid)
+            log.debug("Created item %s for host %s on zabbix server %s" % (itemid["itemids"], self.hostname, self.zabbix_server))
+            
+        if self.zhost.hasTrigger(self.trigger_expression) != True:
+            log.debug("Trigger %s for host %s does not exist: creating it" % (self.trigger_expression, self.hostname))
+            triggerid = self.zhost.createTrigger(self.trigger_expression, "Script %s on {HOST.NAME} returned a non 0 exit value" % scriptname, self.appid) 
+            log.debug("Created trigger %s for host %s on zabbix server %s" % (triggerid["triggerids"], self.hostname, self.zabbix_server))
+            
+        if self.zhost.hasTrigger(self.timeout_expression) != True:
+            log.debug("Trigger %s for host %s does not exist: creating it" % (self.timeout_expression, self.hostname))
+            triggerid = self.zhost.createTrigger(self.timeout_expression, "Script %s on {HOST.NAME} timed out" % scriptname, self.appid) 
+            log.debug("Created trigger %s for host %s on zabbix server %s" % (triggerid["triggerids"], self.hostname, self.zabbix_server))
+            #log.debug("Running [ %s ]" % command_to_run)
+            
+    def run(self, command, timeout):
+        command = Command(command, self.timeoutcallBack)
+        command.run(timeout)
+        return_value = command.return_value
+        command_output = command.command_output
+        
+        self.sendToZabbix(self.item_exit_value, return_value)
+        self.sendToZabbix(self.item_output, command_output)
+    
+    def timeoutcallBack(self, value):
+        self.sendToZabbix(self.item_timeout, value)
+    
+    def sendToZabbix(self, item, value):
+        if self.loggedin and self.hostregistered:
+            try:
+                # Sending output first
+                log.debug("Sending [ %s ] to item %s:%s (Zabbix %s) " % (value, self.hostname, item, self.zabbix_server))
+                output = send_to_zabbix([Metric(self.hostname , item , value )], self.zabbix_server, self.zabbix_server_port)
+                log.debug(output)
+                
+            except:
+                log.error("Error while sending metrics to zabbix server [%s]" % sys.exc_info()[0])
+                log.critical(sys.exc_info())
+        else:
+            pass
+
 
 
 def main():
+    #Everything after "/usr/bin/zabbify" is parsed
+    arguments = sys.argv[1:]
     
-    # I should use a parse library but it should be just a couple of options max so doing it myself
-    parse()
+    #command line options that belong to zabbify are removed from the list of arguments. We are left with the actual command to run
+    script_arguments = parse(arguments)
     
+    
+
     if len(arguments) == 0:
-        sys.exit()
-    
+        sys.exit(0)
+
+    #if an alias was not defined as --itemname, then we take the name of the script we want to run
     if aliasname is None:
-        scriptname = os.path.basename(arguments[0])
+        scriptname = os.path.basename(script_arguments[0])
     else:
         scriptname = aliasname
-        
-    command_to_run = " ".join(arguments)
-    
-    _.debug("Zabbix server %s - Port: %d  - URL %s" % (zabbix_server, zabbix_server_port, zabbix_server_url))
-    
-    zapi = ZabbixAPI(server=zabbix_server_url, path="", log_level=api_log_level)
-    
+   
+    zabbify = None
+   
     try:
-        zapi.login(username, password)
-    except ZabbixAPIException as e:
-        _.error("Error while logging in: %s" % e)
-    except:
-        _.error("Error while logging in: %s" % sys.exc_info()[0])
+        zabbify = Zabbify(config)
+        zabbify.setup(scriptname)
+    except Exception as e:
+        print (e)
+        pass
+    
+    command_to_run = " ".join(script_arguments)
+    
+    zabbify.run(command_to_run, timeout)
 
-    host_name = socket.gethostname()
-
-    
-    _.debug("This host is %s " % host_name)
-    
-    item_exit_value = "exit_value[%s]" % scriptname
-    item_output = "output[%s]" % scriptname
-    trigger_expression = "{%s:%s.last(0)}#0" % (host_name, item_exit_value)
-    
-    hostlist =  zapi.host.get({"output": "extend", "filter":{"host":host_name}})
-    
-    if hostlist:
-        host = hostlist.pop(0)
-    
-        
-        if zapi.item.exists({"host":host_name, "key_":item_exit_value}) != True:
-            _.debug("Item %s for host %s does not exist: creating it" % (item_exit_value, host_name))
-            itemid = zapi.item.create({ "name" : "Exit status for $1", "hostid": host["hostid"] , "key_": item_exit_value, "type": 2, "value_type": 3, "data_type" : 0 })
-            _.debug("Created item %s for host %s on zabbix server %s" % (itemid["itemids"], host_name, zabbix_server))
-
-        if zapi.item.exists({"host":host_name, "key_":item_output}) != True:
-            _.debug("Item %s for host %s does not exist: creating it" % (item_output, host_name))
-            itemid = zapi.item.create({ "name" : "Output for $1", "hostid": host["hostid"] , "key_": item_output, "type": 2, "value_type": 4 })
-            _.debug("Created item %s for host %s on zabbix server %s" % (itemid["itemids"], host_name, zabbix_server))
-            
-        if zapi.trigger.exists({"host":host_name, "expression":trigger_expression}) != True:
-            _.debug("Trigger %s for host %s does not exist: creating it" % (trigger_expression, host_name))
-            triggerid = zapi.trigger.create({ "description" : "Script %s on {HOST.NAME} returned a non 0 exit value" % scriptname, "expression":trigger_expression })
-            _.debug("Created trigger %s for host %s on zabbix server %s" % (triggerid["triggerids"], host_name, zabbix_server))
-
-        _.debug("Running [ %s ]" % command_to_run)
-        
-        return_value = 0
-        command_output = ""
-        try:
-            process = subprocess.Popen(command_to_run, shell = True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            command_output = process.communicate()[0]
-            return_value = process.returncode
-        except subprocess.CalledProcessError as e:
-            return_value = e.returncode
-            command_output = e.output
-        
-        command_output = command_output.decode("utf-8")
-            
-        _.info("Command %s returned %d with output [ %s ]" % (command_to_run, return_value, command_output))
-        
-        try:
-            # Sending output first
-            _.debug("Sending %d to item %s:%s (Zabbix %s) " % (return_value, host_name, item_exit_value, zabbix_server))
-            output = send_to_zabbix([Metric(host_name , item_exit_value , return_value )], zabbix_server, zabbix_server_port)
-            _.debug(output)
-            
-            #Sending return value
-            _.debug("Sending [ %s ] to item %s:%s (Zabbix %s) " % (command_output, host_name, item_output, zabbix_server))
-            output = send_to_zabbix([Metric(host_name , item_output , command_output )], zabbix_server, zabbix_server_port)
-            _.debug(output)
-            
-        except:
-            _.error("Error while sending metrics to zabbix server [%s]" % sys.exc_info()[0])
-            _.critical(sys.exc_info())
-    else:
-        _.error("Host %s does not seem to be registered on the zabbix server %s " % (host_name, zabbix_server))
-        
     
 if __name__ == "__main__": 
-
     main()
